@@ -4,9 +4,11 @@
 import {HavenoDaemon} from "./HavenoDaemon";
 import {HavenoUtils} from "./HavenoUtils";
 import * as grpcWeb from 'grpc-web';
-import {MarketPriceInfo, NotificationMessage, OfferInfo, TradeInfo, XmrBalanceInfo} from './protobuf/grpc_pb'; // TODO (woodser): better names; haveno_grpc_pb, haveno_pb
+import {MarketPriceInfo, NotificationMessage, OfferInfo, TradeInfo, UriConnection, XmrBalanceInfo} from './protobuf/grpc_pb'; // TODO (woodser): better names; haveno_grpc_pb, haveno_pb
 import {PaymentAccount} from './protobuf/pb_pb';
 import {XmrDestination, XmrTx, XmrIncomingTransfer, XmrOutgoingTransfer} from './protobuf/grpc_pb';
+import AuthenticationStatus = UriConnection.AuthenticationStatus;
+import OnlineStatus = UriConnection.OnlineStatus;
 
 // import monero-javascript
 const monerojs = require("monero-javascript"); // TODO (woodser): support typescript and `npm install @types/monero-javascript` in monero-javascript
@@ -189,13 +191,13 @@ test("Can register as dispute agents", async () => {
 });
 
 test("Can receive push notifications", async () => {
-  
+
   // add notification listener
   let notifications: NotificationMessage[] = [];
   await alice.addNotificationListener(notification => {
     notifications.push(notification);
   });
-  
+
   // send test notification
   for (let i = 0; i < 3; i++) {
     await alice._sendNotification(new NotificationMessage()
@@ -203,7 +205,7 @@ test("Can receive push notifications", async () => {
         .setTitle("Test title")
         .setMessage("Test message"));
   }
-  
+
   // test notification
   await wait(1000);
   assert.equal(3, notifications.length);
@@ -627,7 +629,7 @@ test("Can complete a trade", async () => {
   let bobNotifications: NotificationMessage[] = [];
   await alice.addNotificationListener(notification => { aliceNotifications.push(notification); });
   await bob.addNotificationListener(notification => { bobNotifications.push(notification); });
-  
+
   // alice posts offer to buy xmr
   console.log("Alice posting offer");
   let direction = "buy";
@@ -673,7 +675,7 @@ test("Can complete a trade", async () => {
   assert.equal(1, aliceNotifications.length);
   assert.equal("Offer Taken", aliceNotifications[0].getTitle());
   assert.equal("Your offer " + offer.getId() + " has been accepted", aliceNotifications[0].getMessage());
-  
+
   // bob can get trade
   let fetchedTrade: TradeInfo = await bob.getTrade(trade.getTradeId());
   expect(fetchedTrade.getPhase()).toEqual("DEPOSIT_PUBLISHED");
@@ -738,7 +740,140 @@ test("Can complete a trade", async () => {
   expect(bobFee).toBeGreaterThan(BigInt("0"));
 });
 
+test("Monero connection is initially undefined", async () => {
+  let currentMoneroConnection: UriConnection | undefined = await alice.getMoneroConnection();
+  expect(currentMoneroConnection).toBeUndefined();
+});
+
+test("Monero connections contains localhost", async () => {
+  expect(await hasMoneroConnection(alice, TestConfig.monerod.url)).toBeTruthy();
+});
+
+test("Monero connection can be added without username/password", async () => {
+  let uri = "http://foo.bar";
+  if (await hasMoneroConnection(alice, uri)) {
+    // Connection already exists, so remove it first
+    await alice.removeMoneroConnection(uri);
+  }
+
+  let uriConnection = new UriConnection();
+  uriConnection.setUri(uri);
+  await alice.addMoneroConnection(uriConnection);
+
+  expect(await hasMoneroConnection(alice, uri)).toBeTruthy();
+});
+
+test("Monero connection can be added with username/password", async () => {
+  let uri = "http://foo.bar";
+  if (await hasMoneroConnection(alice, uri)) {
+    // Connection already exists, so remove it first
+    await alice.removeMoneroConnection(uri);
+  }
+
+  let uriConnection = new UriConnection();
+  uriConnection.setUri(uri);
+  uriConnection.setUsername("username");
+  uriConnection.setPassword("password");
+  await alice.addMoneroConnection(uriConnection);
+
+  expect(await hasMoneroConnection(alice, uri)).toBeTruthy();
+});
+
+test("Monero connection can be removed", async () => {
+  let uri = "http://foo.bar";
+  if (!await hasMoneroConnection(alice, uri)) {
+    // Connection does not exist yet, so add it first
+    let uriConnection = new UriConnection();
+    uriConnection.setUri(uri);
+    await alice.addMoneroConnection(uriConnection);
+  }
+
+  await alice.removeMoneroConnection(uri);
+
+  expect(await hasMoneroConnection(alice, uri)).toBeFalsy();
+});
+
+test("Monero connection can be set by URI", async () => {
+  await alice.setMoneroConnection(TestConfig.monerod.url);
+
+  let moneroConnection = await alice.getMoneroConnection();
+
+  expect(moneroConnection).toBeDefined();
+  expect(moneroConnection!.getUri()).toEqual(TestConfig.monerod.url);
+  // Connection is only attempted when status is checked
+  expect(moneroConnection!.getOnline()).toEqual(OnlineStatus.UNKNOWN);
+
+});
+
+test("Monero connection can be reset", async () => {
+  await alice.setMoneroConnection(TestConfig.monerod.url);
+  expect(await alice.getMoneroConnection()).toBeDefined();
+
+  // Contains an assertion that this is undefined
+  await resetMoneroConnection(alice);
+});
+
+test("Monero connection can connect and authenticate", async () => {
+  // get haveno's preset localhost connection
+  let localConnection: UriConnection | undefined;
+  for (let connection of await alice.getMoneroConnections()) {
+    if (connection.getUri().includes("localhost")) {
+      localConnection = connection;
+      break;
+    }
+  }
+  if (!localConnection) throw new Error("Haveno expected to have preset localhost");
+
+  // connect to localhost if available
+  let resultConnection = await alice.checkMoneroConnection(localConnection); // check localhost connection status
+  if (resultConnection.getOnline() === OnlineStatus.OFFLINE) {
+    // select among connections
+    let possibleConnections: UriConnection[] = await alice.checkMoneroConnections();
+    for (let possibleConnection of possibleConnections) {
+      if (possibleConnection.getOnline() === OnlineStatus.ONLINE) {
+        resultConnection = possibleConnection;
+      }
+    }
+  }
+
+  if (resultConnection.getAuthenticated() !== AuthenticationStatus.AUTHENTICATED) {
+    // set credentials if needed
+    resultConnection.setUsername(TestConfig.monerod.username);
+    resultConnection.setPassword(TestConfig.monerod.password);
+  }
+  await alice.setMoneroConnection(resultConnection);
+
+  // verify connection
+  let connectionStatus = (await alice.checkCurrentMoneroConnection())!;
+  expect(connectionStatus.getUri()).toEqual(resultConnection.getUri());
+  expect(connectionStatus.getOnline()).toEqual(OnlineStatus.ONLINE);
+  expect(connectionStatus.getAuthenticated()).toEqual(AuthenticationStatus.AUTHENTICATED);
+})
+
 // ------------------------------- HELPERS ------------------------------------
+
+/**
+ * Checks whether the daemon has a monero connection with the provided u
+ */
+async function hasMoneroConnection(daemon: HavenoDaemon, uri: string): Promise<boolean> {
+  return containsMoneroConnection(daemon, connection => connection.getUri() === uri);
+}
+
+/**
+ * Checks whether the daemon has a monero connection which fulfills the provided predicate
+ */
+async function containsMoneroConnection(daemon: HavenoDaemon, predicate: (connection: UriConnection) => boolean): Promise<boolean> {
+  let connections = await daemon.getMoneroConnections();
+  return connections.findIndex(predicate) >= 0;
+}
+
+/**
+ * Resets the current monero connection
+ */
+async function resetMoneroConnection(daemon: HavenoDaemon) {
+  await daemon.setMoneroConnection();
+  expect(await daemon.getMoneroConnection()).toBeUndefined();
+}
 
 /**
  * Initialize arbitrator, alice, or bob by their configuration.
