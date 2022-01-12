@@ -234,7 +234,7 @@ test("Can manage Monero daemon connections", async () => {
     testConnection(connection!, TestConfig.monerod2.uri, OnlineStatus.UNKNOWN, AuthenticationStatus.NO_AUTHENTICATION, 1);
 
     // connection is offline
-    connection = await charlie.checkMoneroConnection(); // TODO (woodser): rename to checkMoneroConnection()
+    connection = await charlie.checkMoneroConnection();
     testConnection(connection!, TestConfig.monerod2.uri, OnlineStatus.OFFLINE, AuthenticationStatus.NO_AUTHENTICATION, 1);
 
     // start monerod2
@@ -273,10 +273,11 @@ test("Can manage Monero daemon connections", async () => {
     await stopHavenoProcess(charlie);
     charlie = await startHavenoProcess(appName, TestConfig.logging.logProcessOutput);
 
-    // connection is online and authenticated
-    await charlie.setMoneroConnection(TestConfig.monerod2.uri); // TODO: backend does not use last used connection
-    connection = await charlie.checkMoneroConnection();  // TODO: remove this when backend uses and checks last connection
+    // connection is restored, online, and authenticated
+    connection = await charlie.getMoneroConnection();
     testConnection(connection!, TestConfig.monerod2.uri, OnlineStatus.ONLINE, AuthenticationStatus.AUTHENTICATED, 1);
+    connections = await charlie.getMoneroConnections();
+    testConnection(getConnection(connections, monerodUri1)!, monerodUri1, OnlineStatus.UNKNOWN, AuthenticationStatus.NO_AUTHENTICATION, 1);
 
     // enable auto switch
     await charlie.setAutoSwitch(true);
