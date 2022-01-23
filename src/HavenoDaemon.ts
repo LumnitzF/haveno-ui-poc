@@ -1,4 +1,5 @@
-import {HavenoUtils} from "./HavenoUtils";
+import {HavenoUtils} from "./utils/HavenoUtils";
+import {TaskLooper} from "./utils/TaskLooper";
 import * as grpcWeb from 'grpc-web';
 import {DisputeAgentsClient, GetVersionClient, NotificationsClient, PriceClient, WalletsClient, OffersClient, PaymentAccountsClient, TradesClient, MoneroConnectionsClient} from './protobuf/GrpcServiceClientPb';
 import {CancelOfferRequest, ConfirmPaymentReceivedRequest, ConfirmPaymentStartedRequest, CreateCryptoCurrencyPaymentAccountReply, CreateCryptoCurrencyPaymentAccountRequest, CreateOfferReply, CreateOfferRequest, CreateXmrTxReply, CreateXmrTxRequest, GetBalancesReply, GetBalancesRequest, GetNewDepositSubaddressReply, GetNewDepositSubaddressRequest, GetOffersReply, GetOffersRequest, GetPaymentAccountsReply, GetPaymentAccountsRequest, GetTradeReply, GetTradeRequest, GetTradesReply, GetTradesRequest, GetVersionReply, GetVersionRequest, GetXmrTxsReply, GetXmrTxsRequest, MarketPriceInfo, MarketPriceReply, MarketPriceRequest, MarketPricesReply, MarketPricesRequest, NotificationMessage, OfferInfo, RegisterDisputeAgentRequest, RegisterNotificationListenerRequest, RelayXmrTxReply, RelayXmrTxRequest, SendNotificationRequest, TakeOfferReply, TakeOfferRequest, TradeInfo, XmrBalanceInfo, XmrDestination, XmrTx, UriConnection, AddConnectionRequest, RemoveConnectionRequest, GetConnectionRequest, GetConnectionsRequest, SetConnectionRequest, CheckConnectionRequest, CheckConnectionsReply, CheckConnectionsRequest, StartCheckingConnectionsRequest, StopCheckingConnectionsRequest, GetBestAvailableConnectionRequest, SetAutoSwitchRequest, CheckConnectionReply, GetConnectionsReply, GetConnectionReply, GetBestAvailableConnectionReply} from './protobuf/grpc_pb';
@@ -9,14 +10,8 @@ const console = require('console');
  * Haveno daemon client using gRPC.
  */
 class HavenoDaemon {
-
-  _url: string;
-  _password: string;
-  _process: any;
-  _processLogging: boolean = false;
-  _notificationListeners: ((notification: NotificationMessage) => void)[] = [];
-  _walletRpcPort: number|undefined;
-  _appName: string|undefined;
+  
+  // grpc clients
   _getVersionClient: GetVersionClient;
   _disputeAgentsClient: DisputeAgentsClient;
   _notificationsClient: NotificationsClient;
@@ -27,6 +22,16 @@ class HavenoDaemon {
   _offersClient: OffersClient;
   _tradesClient: TradesClient;
   
+  // other instance variables
+  _url: string;
+  _password: string;
+  _process: any;
+  _processLogging: boolean = false;
+  _walletRpcPort: number|undefined;
+  _notificationListeners: ((notification: NotificationMessage) => void)[] = [];
+  _keepAlivePeriodMs: number = 60000;
+  _appName: string|undefined;
+
   /**
    * Construct a client connected to a Haveno daemon.
    * 
@@ -235,14 +240,14 @@ class HavenoDaemon {
   
   /**
    * Add a listener to receive notifications from the Haveno daemon.
-   *
+   * 
    * @param {HavenoDaemonListener} listener - the notification listener to add
    */
   async addNotificationListener(listener: (notification: NotificationMessage) => void): Promise<void> {
     this._notificationListeners.push(listener);
     if (this._notificationListeners.length === 1) return this._registerNotificationListener();
   }
-
+  
   /**
    * Add a Monero daemon connection.
    *
@@ -305,7 +310,7 @@ class HavenoDaemon {
 
   /**
    * Set the current Monero daemon connection.
-   * 
+   *
    * Add the connection if not previously seen.
    * If the connection is provided as string, connect to the URI with any previously set credentials and priority.
    * If the connection is provided as UriConnection, overwrite any previously set credentials and priority.
@@ -693,8 +698,8 @@ class HavenoDaemon {
   async takeOffer(offerId: string, paymentAccountId: string): Promise<TradeInfo> {
     let that = this;
     let request = new TakeOfferRequest()
-        .setOfferId(offerId)
-        .setPaymentAccountId(paymentAccountId);
+            .setOfferId(offerId)
+            .setPaymentAccountId(paymentAccountId);
     return new Promise(function(resolve, reject) {
       that._tradesClient.takeOffer(request, {password: that._password}, function(err: grpcWeb.RpcError, response: TakeOfferReply) {
         if (err) reject(err);
@@ -764,8 +769,9 @@ class HavenoDaemon {
       });
     });
   }
+  
   // ------------------------------- HELPERS ----------------------------------
-
+  
   /**
    * Register a listener to receive notifications.
    * Due to the nature of grpc streaming, this method returns a promise
@@ -774,19 +780,36 @@ class HavenoDaemon {
   async _registerNotificationListener(): Promise<void> {
     let that = this;
     return new Promise(function(resolve) {
+
+      // send request to register client listener
       that._notificationsClient.registerNotificationListener(new RegisterNotificationListenerRequest(), {password: that._password})
-          .on("data", (data) => {
-            if (data instanceof NotificationMessage) {
-              for (let listener of that._notificationListeners) listener(data);
-            }
-          });
-      setTimeout(function() { resolve(); }, 1000); // TODO: call returns before listener registered
+        .on("data", (data) => {
+          if (data instanceof NotificationMessage) {
+            for (let listener of that._notificationListeners) listener(data);
+          }
+        });
+
+      // periodically send keep alive requests // TODO (woodser): better way to keep notification stream alive?
+      let firstRequest = true;
+      let taskLooper = new TaskLooper(async function() {
+        if (firstRequest) {
+          firstRequest = false;
+          return;
+        }
+        await that._sendNotification(new NotificationMessage()
+                .setType(NotificationMessage.NotificationType.KEEP_ALIVE)
+                .setTimestamp(Date.now()));
+      });
+      taskLooper.start(that._keepAlivePeriodMs);
+
+      // TODO: call returns before listener registered
+      setTimeout(function() { resolve(); }, 1000);
     });
   }
-
+  
   /**
    * Send a notification.
-   *
+   * 
    * @param {NotificationMessage} notification - notification to send
    */
   async _sendNotification(notification: NotificationMessage): Promise<void> {
